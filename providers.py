@@ -66,3 +66,4 @@ def review(task):
     r=json.loads(s); n=r.get('recommended'); v=r.get('verdict')
     if type(n)!=int or not 0<=n<=100 or v not in ['approve','adjust','needs_evidence'] or not all(isinstance(r.get(k),str) and r[k].strip() for k in ['reason','improvements']): raise ValueError('模型未返回有效审核结果，请重试。')
     return {'recommended':n,'verdict':v,'reason':r['reason'][:2000],'improvements':r['improvements'][:2000],'model':model}
+
