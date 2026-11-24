@@ -5,7 +5,7 @@ from urllib.parse import urlparse,parse_qs
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
-from providers import get,history,review,array
+from providers import get,history,review,array,SourceError,proxy_configured
 ROOT=Path(__file__).resolve().parent
 DB=Path(os.getenv('STUDY_DB',str(ROOT/'study.sqlite3')))
 PORT=int(os.getenv('STUDY_PORT','8765'))
@@ -197,6 +197,7 @@ def worker():
         except Exception: pass
         time.sleep(60)
 
+def source_error(e,tail): return {'error':f'{e}，{tail}','source':e.source,'reason':e.kind,'proxy':proxy_configured()}
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
     def response(self,data,status=200,typ='application/json; charset=utf-8',headers=None):
@@ -221,6 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path=='/api/replay': r=replay(param('asset'),param('mode','demo'))
             else: return self.response({'error':'Not found'},404)
             self.response(r)
+        except SourceError as e: self.response(source_error(e,'未执行模拟交易。'),502)
         except ValueError as e: self.response({'error':str(e)[:300]},400)
         except Exception: self.response({'error':'数据源或服务不可用，未执行模拟交易。'},502)
     def do_POST(self):
@@ -230,6 +232,7 @@ class Handler(BaseHTTPRequestHandler):
             funcs={'/api/tasks':submit,'/api/tasks/delete':lambda d:delete_task(d.get('id')),'/api/review':lambda d:review_task(d.get('id')),'/api/credit':credit,'/api/open':open_position,'/api/settle':lambda d:settle(d.get('id'))}
             if self.path not in funcs: return self.response({'error':'Not found'},404)
             self.response(funcs[self.path](d))
+        except SourceError as e: self.response(source_error(e,'未确认操作，请刷新账本核对。'),502)
         except ValueError as e: self.response({'error':str(e)[:300]},400)
         except Exception: self.response({'error':'服务或上游接口异常；未确认操作，请刷新账本核对。'},502)
 if __name__=='__main__':

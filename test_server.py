@@ -88,4 +88,30 @@ class Tests(unittest.TestCase):
         finally: srv.shutdown(); srv.server_close(); s.PORT=old
     def test_normalize(self):
         m=s.normalize_market({'id':'123','question':'Test?','outcomes':'["No","Yes"]','clobTokenIds':'["222","111"]','outcomePrices':'["0.6","0.4"]','active':True,'closed':False,'acceptingOrders':True});self.assertEqual(m['tokens']['YES'],'111');self.assertTrue(m['open'])
+    def test_source_error_mapping(self):
+        import providers as p, socket
+        from urllib.error import URLError, HTTPError
+        cases=[(URLError(socket.timeout('timed out')),'https://gamma-api.polymarket.com/markets','Polymarket 连接超时','timeout'),
+               (TimeoutError('timed out'),'https://api.exchange.coinbase.com/products','Coinbase 连接超时','timeout'),
+               (URLError(socket.gaierror(8,'nodename')),'https://clob.polymarket.com/book','Polymarket 域名解析失败','dns'),
+               (URLError(ConnectionRefusedError(61,'refused')),'https://api.exchange.coinbase.com/x','Coinbase 无法访问','unreachable'),
+               (HTTPError('https://api.twelvedata.com/time_series?apikey=SECRET',429,'Too Many',{},None),'https://api.twelvedata.com/time_series?apikey=SECRET','Twelve Data 请求过于频繁','rate_limited')]
+        for exc,url,msg,kind in cases:
+            with patch.object(p,'urlopen',side_effect=exc), self.assertRaises(p.SourceError) as cm: p.request(url)
+            self.assertTrue(str(cm.exception).startswith(msg),str(cm.exception)); self.assertEqual(cm.exception.kind,kind)
+            self.assertNotIn('SECRET',str(cm.exception)); self.assertNotIn('http',str(cm.exception))
+        with patch.dict('os.environ',{'TWELVE_DATA_API_KEY':''}), self.assertRaisesRegex(ValueError,'Twelve Data 未配置密钥'): p.history('NVDA')
+    def test_source_error_http_502(self):
+        import providers as p, socket
+        from urllib.error import URLError
+        srv=s.ThreadingHTTPServer(('127.0.0.1',0),s.Handler); port=srv.server_address[1]; old=s.PORT; s.PORT=port
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        try:
+            op=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with patch.object(p,'urlopen',side_effect=URLError(socket.timeout('timed out'))):
+                with self.assertRaises(urllib.error.HTTPError) as cm: op.open(f'http://127.0.0.1:{port}/api/markets')
+            self.assertEqual(cm.exception.code,502); j=json.loads(cm.exception.read())
+            self.assertEqual(j['error'],'Polymarket 连接超时，未执行模拟交易。'); self.assertEqual((j['source'],j['reason']),('Polymarket','timeout'))
+            self.assertIsInstance(j['proxy'],bool); self.assertEqual(s.state()['positions'],[])
+        finally: srv.shutdown(); srv.server_close(); s.PORT=old
 if __name__=='__main__':unittest.main(verbosity=2)

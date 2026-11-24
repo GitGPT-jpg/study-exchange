@@ -2,14 +2,45 @@
 import os, json, math, re, time, datetime as dt
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qs
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, getproxies
+from urllib.error import HTTPError, URLError
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT=Path(__file__).resolve().parent
 
+SOURCES={'gamma-api.polymarket.com':'Polymarket','clob.polymarket.com':'Polymarket','api.exchange.coinbase.com':'Coinbase','api.twelvedata.com':'Twelve Data'}
+class SourceError(Exception):
+    """Upstream failure with a user-safe Chinese message; never carries URLs, keys or tracebacks."""
+    def __init__(self, source, kind, detail):
+        super().__init__(f'{source} {detail}'); self.source=source; self.kind=kind
+
+def proxy_configured(): return bool(getproxies().get('https'))
+
+def classify(source, e):
+    if isinstance(e, HTTPError):
+        c=e.code
+        if c in (401,403): return SourceError(source,'denied',f'拒绝访问（HTTP {c}），请检查密钥或网络出口')
+        if c==429: return SourceError(source,'rate_limited','请求过于频繁（HTTP 429），请稍后重试')
+        if c>=500: return SourceError(source,'upstream',f'服务暂时异常（HTTP {c}）')
+        return SourceError(source,'http',f'返回错误（HTTP {c}）')
+    reason=e.reason if isinstance(e, URLError) else e
+    if isinstance(reason,(TimeoutError,socket.timeout)): return SourceError(source,'timeout','连接超时')
+    if isinstance(reason,socket.gaierror): return SourceError(source,'dns','域名解析失败')
+    if isinstance(reason,ssl_errors()): return SourceError(source,'tls','TLS 握手失败，可能被网络拦截')
+    return SourceError(source,'unreachable','无法访问')
+
+def ssl_errors():
+    import ssl; return (ssl.SSLError, ssl.CertificateError)
+
 def request(url, data=None, headers=None):
+    source=SOURCES.get(urlparse(url).hostname or '','审核模型服务')
     h={'User-Agent':'StudyExchange/2.0','Accept':'application/json', **(headers or {})}
-    with urlopen(Request(url, data=json.dumps(data).encode() if data is not None else None, headers=h),timeout=12) as r:
-        return json.loads(r.read(4_000_000))
+    try:
+        with urlopen(Request(url, data=json.dumps(data).encode() if data is not None else None, headers=h),timeout=12) as r:
+            body=r.read(4_000_000)
+    except (URLError, OSError) as e: raise classify(source, e) from None
+    try: return json.loads(body)
+    except ValueError: raise SourceError(source,'bad_data','返回了无法解析的数据') from None
 
 def get(base, params): return request(base+'?'+urlencode(params))
 def array(x): return json.loads(x) if isinstance(x,str) else x
@@ -36,7 +67,7 @@ def history(asset, token=''):
         source='Coinbase Exchange · BTC/USD 日线历史回放'
     elif asset=='NVDA':
         key=os.environ.get('TWELVE_DATA_API_KEY')
-        if not key: raise ValueError('NVDA 历史数据需在服务端配置 TWELVE_DATA_API_KEY。')
+        if not key: raise ValueError('Twelve Data 未配置密钥：NVDA 历史数据需在服务端设置 TWELVE_DATA_API_KEY。')
         raw=get('https://api.twelvedata.com/time_series',{'symbol':'NVDA','interval':'1day','outputsize':90,'apikey':key})
         if 'values' not in raw: raise ValueError('NVDA 数据服务未返回可用历史数据，请检查权限与额度。')
         a=[{'t':int(dt.datetime.fromisoformat(r['datetime']).replace(tzinfo=dt.timezone.utc).timestamp()),'p':float(r['close']),'low':float(r['low']),'high':float(r['high'])} for r in raw['values']]
