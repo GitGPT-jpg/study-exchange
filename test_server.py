@@ -1,0 +1,58 @@
+import tempfile, unittest, concurrent.futures
+from pathlib import Path
+from unittest.mock import patch
+import server as s
+
+MARKET={'id':'123','question':'Test event?','description':'Test rules','condition':'0xabc','tokens':{'YES':'111','NO':'222'},'prices':{'YES':.4,'NO':.6},'open':True,'closed':False,'resolution':''}
+BOOK={'token':'111','bids':[(.39,100)],'asks':[(.4,10),(.5,100)],'received':'2026-11-24T00:00:00Z','timestamp':'123','hash':'test'}
+class Tests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(); self.old=s.DB; s.DB=Path(self.tmp.name)/'db.sqlite3'
+    def tearDown(self): s.DB=self.old; self.tmp.cleanup()
+    def task(self):return s.submit({'title':'学习 KV Cache','topic':'KV Cache','work':'独立推导了 GQA 下的缓存显存公式','evidence':'计算结果为 2LHSDB','minutes':40,'requested':20})
+    def funded(self):
+        t=self.task(); s.credit({'id':t['id'],'amount':20,'reason':'自评确认'}); return t
+    def test_mint_and_duplicate(self):
+        t=self.funded(); self.assertEqual(s.state()['xp'],20); self.assertEqual(s.state()['balance'],20)
+        with self.assertRaises(ValueError): self.task()
+        with self.assertRaises(ValueError): s.credit({'id':t['id'],'amount':20,'reason':'duplicate'})
+    def test_model_review_and_credit(self):
+        t=self.task()
+        with patch.object(s,'review',return_value={'recommended':8,'verdict':'adjust','reason':'证据有限','improvements':'补充实验','model':'mock'}):s.review_task(t['id'])
+        with self.assertRaises(ValueError):s.credit({'id':t['id'],'amount':12,'reason':''})
+        s.credit({'id':t['id'],'amount':8,'reason':''}); self.assertEqual(s.state()['xp'],8)
+    def test_concurrent_credit(self):
+        t=self.task()
+        def f(_):
+            try:s.credit({'id':t['id'],'amount':20,'reason':'确认'});return True
+            except ValueError:return False
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex: self.assertEqual(sum(ex.map(f,range(4))),1)
+        self.assertEqual(s.state()['balance'],20)
+    def test_poly_fill_and_close(self):
+        self.funded()
+        with patch.object(s,'market',return_value=MARKET),patch.object(s,'book',return_value=BOOK):
+            p=s.open_position({'kind':'POLY','market':'123','outcome':'YES','stake':10})['positions'][0]; self.assertAlmostEqual(p['qty'],22); self.assertEqual(s.state()['balance'],10)
+            result=s.settle(p['id']); self.assertAlmostEqual(result['balance'],18.58); self.assertEqual(result['xp'],20)
+            with self.assertRaises(ValueError):s.settle(p['id'])
+            with self.assertRaises(ValueError):s.open_position({'kind':'POLY','market':'123','outcome':'YES','stake':1})
+    def test_no_fill_and_no_fake_data(self):
+        self.funded()
+        with patch.object(s,'market',return_value=MARKET),patch.object(s,'book',side_effect=OSError('offline')):
+            with self.assertRaises(OSError):s.open_position({'kind':'POLY','market':'123','outcome':'YES','stake':10})
+        self.assertEqual(s.state()['balance'],20); self.assertFalse(s.state()['positions'])
+        with self.assertRaises(ValueError):s.fill_buy({'asks':[(.4,1)]},10)
+        with self.assertRaises(ValueError):s.fill_sell({'bids':[]},1)
+    def test_resolution(self):
+        self.funded()
+        with patch.object(s,'market',return_value=MARKET),patch.object(s,'book',return_value=BOOK):p=s.open_position({'kind':'POLY','market':'123','outcome':'YES','stake':4})['positions'][0]
+        with patch.object(s,'market',return_value={**MARKET,'open':False,'closed':True,'prices':{'YES':1,'NO':0}}):
+            self.assertIsNone(s.settle(p['id'],True)); self.assertEqual(s.state()['balance'],16)
+        with patch.object(s,'market',return_value={**MARKET,'open':False,'closed':True,'resolution':'resolved','prices':{'YES':1,'NO':0}}):
+            self.assertEqual(s.settle(p['id'],True)['balance'],26)
+    def test_replay_hides_future(self):
+        self.funded(); r=s.replay('BTC','demo');self.assertEqual(len(r['points']),15)
+        p=s.open_position({'kind':'REPLAY','replay':r['id'],'leverage':10,'direction':'short','stake':10})['positions'][0];self.assertNotIn('future',p)
+        v=s.settle(p['id']);self.assertGreaterEqual(v['balance'],0);self.assertEqual(v['xp'],20)
+    def test_normalize(self):
+        m=s.normalize_market({'id':'123','question':'Test?','outcomes':'["No","Yes"]','clobTokenIds':'["222","111"]','outcomePrices':'["0.6","0.4"]','active':True,'closed':False,'acceptingOrders':True});self.assertEqual(m['tokens']['YES'],'111');self.assertTrue(m['open'])
+if __name__=='__main__':unittest.main(verbosity=2)
