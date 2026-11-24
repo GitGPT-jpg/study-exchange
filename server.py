@@ -1,5 +1,5 @@
 """Single-user local learning ledger; all orders are simulated, no exchange credentials."""
-import os,json,time,math,re,sqlite3,uuid,hashlib,random,threading,datetime as dt
+import os,json,time,math,re,sqlite3,uuid,hashlib,random,threading,tempfile,datetime as dt
 from pathlib import Path
 from urllib.parse import urlparse,parse_qs
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -53,6 +53,22 @@ def submit(d):
         require(not any(x['fingerprint']==fp for x in s['tasks']),'相同成果已申报，请补充新的独立成果')
         t.update(id=uid(),fingerprint=fp,created=now(),credited=None,review=None); s['tasks'].insert(0,t)
     return t
+
+def delete_task(id):
+    with transaction() as s:
+        t=task_by(s,id); require(t['credited'] is None,'已入账任务不可删除，账本只追加不改写'); s['tasks'].remove(t)
+    return public(state())
+
+def backup():
+    # Online, consistent copy via the SQLite backup API; safe while the server keeps running.
+    src=connect()
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            f=Path(d)/'backup.sqlite3'; dst=sqlite3.connect(f)
+            try: src.backup(dst)
+            finally: dst.close()
+            return f.read_bytes()
+    finally: src.close()
 
 def review_task(id):
     s=state(); t=task_by(s,id); require(t['credited'] is None,'已入账任务不可重审')
@@ -183,8 +199,10 @@ def worker():
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
-    def response(self,data,status=200,typ='application/json; charset=utf-8'):
-        b=data if isinstance(data,bytes) else json.dumps(data,ensure_ascii=False,allow_nan=False).encode(); self.send_response(status); self.send_header('Content-Type',typ); self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff'); self.send_header('Referrer-Policy','no-referrer'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
+    def response(self,data,status=200,typ='application/json; charset=utf-8',headers=None):
+        b=data if isinstance(data,bytes) else json.dumps(data,ensure_ascii=False,allow_nan=False).encode(); self.send_response(status); self.send_header('Content-Type',typ); self.send_header('Cache-Control','no-store')
+        for k,v in (headers or {}).items(): self.send_header(k,v)
+        self.send_header('X-Content-Type-Options','nosniff'); self.send_header('Referrer-Policy','no-referrer'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def allowed(self):
         allowed={f'127.0.0.1:{PORT}',f'localhost:{PORT}'}; extra=os.getenv('STUDY_ALLOWED_HOST','');
         if extra: allowed.add(extra)
@@ -196,6 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             static={'/':('index.html','text/html; charset=utf-8'),'/manifest.webmanifest':('manifest.webmanifest','application/manifest+json'),'/icon.svg':('icon.svg','image/svg+xml'),'/icon-192.png':('icon-192.png','image/png'),'/icon-512.png':('icon-512.png','image/png'),'/sw.js':('sw.js','application/javascript'),'/app.js':('app.js','application/javascript'),'/style.css':('style.css','text/css')}
             if u.path in static:
                 fn,typ=static[u.path]; return self.response((ROOT/fn).read_bytes(),typ=typ)
+            if u.path=='/api/backup': return self.response(backup(),typ='application/vnd.sqlite3',headers={'Content-Disposition':f'attachment; filename="study-exchange-{day()}.sqlite3"'})
             if u.path in ('/api/state','/api/export'): r=public(state())
             elif u.path=='/api/markets': r=markets()
             elif u.path=='/api/quote': r=quote(param('token'))
@@ -208,7 +227,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed() or self.headers.get('Content-Type','').split(';')[0]!='application/json': return self.response({'error':'Origin / Content-Type not allowed'},403)
         try:
             n=int(self.headers.get('Content-Length',0)); require(0<n<=60000,'请求长度无效'); d=json.loads(self.rfile.read(n)); require(isinstance(d,dict),'无效请求')
-            funcs={'/api/tasks':submit,'/api/review':lambda d:review_task(d.get('id')),'/api/credit':credit,'/api/open':open_position,'/api/settle':lambda d:settle(d.get('id'))}
+            funcs={'/api/tasks':submit,'/api/tasks/delete':lambda d:delete_task(d.get('id')),'/api/review':lambda d:review_task(d.get('id')),'/api/credit':credit,'/api/open':open_position,'/api/settle':lambda d:settle(d.get('id'))}
             if self.path not in funcs: return self.response({'error':'Not found'},404)
             self.response(funcs[self.path](d))
         except ValueError as e: self.response({'error':str(e)[:300]},400)

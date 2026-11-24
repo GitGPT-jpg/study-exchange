@@ -1,4 +1,4 @@
-import tempfile, unittest, concurrent.futures
+import tempfile, unittest, concurrent.futures, sqlite3, json, threading, urllib.request
 from pathlib import Path
 from unittest.mock import patch
 import server as s
@@ -53,6 +53,28 @@ class Tests(unittest.TestCase):
         self.funded(); r=s.replay('BTC','demo');self.assertEqual(len(r['points']),15)
         p=s.open_position({'kind':'REPLAY','replay':r['id'],'leverage':10,'direction':'short','stake':10})['positions'][0];self.assertNotIn('future',p)
         v=s.settle(p['id']);self.assertGreaterEqual(v['balance'],0);self.assertEqual(v['xp'],20)
+    def test_delete_pending_only(self):
+        t=self.task(); self.assertEqual(s.delete_task(t['id'])['tasks'],[])
+        with self.assertRaises(ValueError):s.delete_task(t['id'])
+        t=self.task(); s.credit({'id':t['id'],'amount':5,'reason':'自评确认'})
+        with self.assertRaises(ValueError):s.delete_task(t['id'])
+        self.assertEqual(len(s.state()['tasks']),1); self.assertEqual(s.state()['balance'],5)
+    def test_backup_is_restorable_sqlite(self):
+        self.funded(); f=Path(self.tmp.name)/'restore.sqlite3'; f.write_bytes(s.backup())
+        c=sqlite3.connect(f)
+        try: d=json.loads(c.execute('SELECT data FROM state WHERE id=1').fetchone()[0])
+        finally: c.close()
+        self.assertEqual(d['balance'],20); self.assertEqual(len(d['tasks']),1)
+    def test_http_backup_and_delete(self):
+        t=self.task(); srv=s.ThreadingHTTPServer(('127.0.0.1',0),s.Handler); port=srv.server_address[1]; old=s.PORT; s.PORT=port
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        try:
+            base=f'http://127.0.0.1:{port}'; op=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            r=op.open(base+'/api/backup'); self.assertEqual(r.headers['Content-Type'],'application/vnd.sqlite3'); self.assertIn('attachment',r.headers['Content-Disposition']); self.assertTrue(r.read().startswith(b'SQLite format 3'))
+            self.assertEqual(json.loads(op.open(base+'/api/state').read())['tasks'][0]['id'],t['id'])
+            req=urllib.request.Request(base+'/api/tasks/delete',json.dumps({'id':t['id']}).encode(),{'Content-Type':'application/json'})
+            self.assertEqual(json.loads(op.open(req).read())['tasks'],[])
+        finally: srv.shutdown(); srv.server_close(); s.PORT=old
     def test_normalize(self):
         m=s.normalize_market({'id':'123','question':'Test?','outcomes':'["No","Yes"]','clobTokenIds':'["222","111"]','outcomePrices':'["0.6","0.4"]','active':True,'closed':False,'acceptingOrders':True});self.assertEqual(m['tokens']['YES'],'111');self.assertTrue(m['open'])
 if __name__=='__main__':unittest.main(verbosity=2)
