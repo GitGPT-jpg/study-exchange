@@ -75,6 +75,17 @@ class Tests(unittest.TestCase):
             req=urllib.request.Request(base+'/api/tasks/delete',json.dumps({'id':t['id']}).encode(),{'Content-Type':'application/json'})
             self.assertEqual(json.loads(op.open(req).read())['tasks'],[])
         finally: srv.shutdown(); srv.server_close(); s.PORT=old
+    def test_http_manifest_installable(self):
+        srv=s.ThreadingHTTPServer(('127.0.0.1',0),s.Handler); port=srv.server_address[1]; old=s.PORT; s.PORT=port
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        try:
+            base=f'http://127.0.0.1:{port}'; op=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            r=op.open(base+'/manifest.webmanifest'); self.assertEqual(r.headers['Content-Type'],'application/manifest+json'); m=json.loads(r.read())
+            self.assertEqual((m['display'],m['start_url'],m['scope']),('standalone','/','/')); self.assertTrue(m['name'] and m['short_name'])
+            sizes={i['sizes'] for i in m['icons']}; self.assertTrue({'192x192','512x512'}<=sizes)
+            for i in m['icons']: self.assertTrue(op.open(base+i['src']).read().startswith(b'\x89PNG'))
+            html=op.open(base+'/').read().decode(); self.assertIn('rel="manifest"',html); self.assertIn('id="install"',html)
+        finally: srv.shutdown(); srv.server_close(); s.PORT=old
     def test_normalize(self):
         m=s.normalize_market({'id':'123','question':'Test?','outcomes':'["No","Yes"]','clobTokenIds':'["222","111"]','outcomePrices':'["0.6","0.4"]','active':True,'closed':False,'acceptingOrders':True});self.assertEqual(m['tokens']['YES'],'111');self.assertTrue(m['open'])
 if __name__=='__main__':unittest.main(verbosity=2)
